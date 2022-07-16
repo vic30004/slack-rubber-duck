@@ -2,10 +2,12 @@ package application
 
 import (
 	"context"
-	"math/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"math/rand"
+	"net/http"
 	"strings"
 	"time"
 
@@ -32,6 +34,18 @@ func HandleSocketEvents(ctx context.Context, client *slack.Client, socketClient 
 
 				socketClient.Ack(*event.Request)
 				err := handleEventMessage(eventsAPIEvent, client)
+				if err != nil {
+					log.Fatal(err)
+				}
+			case socketmode.EventTypeSlashCommand:
+				command, ok := event.Data.(slack.SlashCommand)
+				if !ok {
+					log.Printf("Could not type cast the message to a SlashCommand: %v\n", command)
+					continue
+				}
+				//acknowledge the event
+				socketClient.Ack(*event.Request)
+				err := handleSlashCommand(command, client)
 				if err != nil {
 					log.Fatal(err)
 				}
@@ -141,9 +155,11 @@ func handleMessageEvent(event *slackevents.MessageEvent, user *slack.User, clien
 	if strings.Contains(text, "hello") {
 		// Greet the user
 		message = fmt.Sprintf("Hello %s, how can I help you get unstuck?", user.Name)
+	} else if strings.Contains(text, "thank you"){
+		message = fmt.Sprintf("You are welcome %s", user.Name)
 	} else {
 		// Send a message to the user
-		var helpMessages = []string{"Did you check the logs?", "What did you do to debug?", "Do not worry, you won't be stuck on this forever.", "Maybe take a break from this one and look it again later."}
+		var helpMessages = []string{"Did you check the logs?", "What did you do to debug?", "Do not worry, you won't be stuck on this forever.", "Maybe take a break from this one and look at it again later."}
 		rand.Seed(time.Now().UnixNano())
 		message = helpMessages[rand.Intn(len(helpMessages))]
 	}
@@ -152,6 +168,42 @@ func handleMessageEvent(event *slackevents.MessageEvent, user *slack.User, clien
 	_, _, err = client.PostMessage(event.Channel, slack.MsgOptionText(message, false))
 	if err != nil {
 		return fmt.Errorf("failed to post message: %w", err)
+	}
+	return nil
+}
+
+func handleSlashCommand(command slack.SlashCommand, client *slack.Client) error {
+	switch command.Command {
+	case "/lookup":
+		return handleLookUpCommand(command, client)
+	}
+	return nil
+}
+
+func handleLookUpCommand(command slack.SlashCommand, client *slack.Client) error {
+	message := command.Text
+	splitStr := strings.Split(message, " ")
+
+	parsed := strings.Join(splitStr, `-`)
+	url := fmt.Sprintf(`https://api.stackexchange.com/2.3/search/advanced?pagesize=3&order=desc&sort=relevance&q=%s&site=stackoverflow`, parsed)
+	res, err := http.Get(url)
+	if err != nil {
+		log.Fatalln(err)
+		return err
+	}
+
+	var resp StackResponse
+	json.NewDecoder(res.Body).Decode(&resp)
+
+	for _, v := range resp.Items {
+		m := fmt.Sprintf(`%s
+%s`, v.Title, v.Link)
+		_, _, err = client.PostMessage(command.ChannelID, slack.MsgOptionText(m, false))
+		if err != nil {
+			log.Fatalln("failed to post message: %w", err)
+			return err
+		}
+		time.Sleep(5 * time.Second)
 	}
 	return nil
 }
